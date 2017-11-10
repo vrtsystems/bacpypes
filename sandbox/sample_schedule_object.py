@@ -111,6 +111,6 @@ so2._property_monitors['presentValue'].append(
 so1.presentValue = Integer(1)
 
 # change the element
-so2.WriteProperty('presentValue', AnyAtomic(Real(80.0)))
+so2.WriteProperty('presentValue', Real(80.0))
 
 

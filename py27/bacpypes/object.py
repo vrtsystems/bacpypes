@@ -202,7 +202,14 @@ class Property:
                 raise ExecutionError(errorClass='property', errorCode='writeAccessDenied')
 
             # if it's atomic, make sure it's valid
-            if issubclass(self.datatype, Atomic):
+            if issubclass(self.datatype, AnyAtomic):
+                if _debug: Property._debug("    - property is any atomic, checking value")
+                if not isinstance(value, Atomic):
+                    raise InvalidParameterDatatype("%s must be an atomic instance" % (
+                            self.identifier,
+                            ))
+
+            elif issubclass(self.datatype, Atomic):
                 if _debug: Property._debug("    - property is atomic, checking value")
                 if not self.datatype.is_valid(value):
                     raise InvalidParameterDatatype("%s must be of type %s" % (
