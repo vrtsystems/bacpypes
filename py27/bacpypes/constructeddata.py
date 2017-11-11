@@ -1149,7 +1149,7 @@ class Any:
 #
 
 @bacpypes_debugging
-class AnyAtomic:
+class AnyAtomic(Atomic):
 
     def __init__(self, arg=None):
         if _debug: AnyAtomic._debug("__init__ %r", arg)
@@ -1179,6 +1179,13 @@ class AnyAtomic:
 
         # get the data
         self.value = tag.app_to_object()
+
+    @classmethod
+    def is_valid(cls, arg):
+        """Return True if arg is valid value for the class.  If the string
+        value is wrong for the enumeration, the encoding will fail.
+        """
+        return isinstance(arg, Atomic) and not isinstance(arg, AnyAtomic)
 
     def __str__(self):
         return "AnyAtomic(%s)" % (str(self.value), )
