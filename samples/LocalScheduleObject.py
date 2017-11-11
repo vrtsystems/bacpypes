@@ -1,7 +1,7 @@
 #!/usr/bin/env python
 
 """
-Sample Schedule Object
+Local Schedule Object
 """
 
 from functools import partial
@@ -9,10 +9,10 @@ from functools import partial
 from bacpypes.debugging import bacpypes_debugging, ModuleLogger
 from bacpypes.consolelogging import ConfigArgumentParser
 
-from bacpypes.core import run
-from bacpypes.task import RecurringTask
+from bacpypes.core import run, deferred
+from bacpypes.task import OneShotTask
 
-from bacpypes.primitivedata import Null, Integer, Real
+from bacpypes.primitivedata import Atomic, Null, Integer, Real, Date, Time
 from bacpypes.constructeddata import ArrayOf, AnyAtomic
 from bacpypes.basetypes import DailySchedule, TimeValue
 from bacpypes.object import register_object_type, WritableProperty, ScheduleObject
@@ -25,47 +25,120 @@ _debug = 0
 _log = ModuleLogger(globals())
 
 #
-#   SampleScheduleObject
+#   LocalScheduleObject
 #
 
 @bacpypes_debugging
 @register_object_type(vendor_id=999)
-class SampleScheduleObject(ScheduleObject):
+class LocalScheduleObject(ScheduleObject):
 
     properties = [
         WritableProperty('presentValue', AnyAtomic),
         ]
 
     def __init__(self, **kwargs):
-        if _debug: SampleScheduleObject._debug("__init__ %r", kwargs)
+        if _debug: LocalScheduleObject._debug("__init__ %r", kwargs)
         ScheduleObject.__init__(self, **kwargs)
 
-        self._task = SampleScheduleInterpreter(self)
+        # attach an interpreter task
+        self._task = LocalScheduleInterpreter(self)
+
+        # add some monitors
+        for prop in ('weeklySchedule', 'exceptionSchedule', 'scheduleDefault'):
+            self._property_monitors[prop].append(self._check_reliability)
+
+        # check it now
+        self._check_reliability()
+
+    def _check_reliability(self, old_value=None, new_value=None):
+        """This function is called when the object is created and after
+        one of its configuration properties has changed.  The new and old value
+        parameters are ignored, this is called after the property has been
+        changed and this is only concerned with the current value."""
+        if _debug: LocalScheduleObject._debug("_check_reliability %r %r", old_value, new_value)
+
+        try:
+            schedule_default = self.scheduleDefault
+
+            if schedule_default is None:
+                raise ValueError("scheduleDefault expected")
+            if not isinstance(schedule_default, Atomic):
+                raise TypeError("scheduleDefault must be an instance of an atomic type")
+
+            if (self.weeklySchedule is None) and (self.exceptionSchedule is None):
+                raise ValueError("schedule required")
+
+            schedule_datatype = schedule_default.__class__
+            if _debug: LocalScheduleObject._debug("    - schedule_datatype: %r", schedule_datatype)
+
+            # check the weekly schedule values
+            if self.weeklySchedule:
+                for daily_schedule in self.weeklySchedule:
+                    for time_value in daily_schedule.daySchedule:
+                        if _debug: LocalScheduleObject._debug("    - daily time_value: %r", time_value)
+                        if time_value.value.__class__ is Null:
+                            pass
+                        elif time_value.value.__class__ is not schedule_datatype:
+                            raise TypeError("wrong type")
+
+            # check the exception schedule values
+            if self.exceptionSchedule:
+                for special_event in self.exceptionSchedule:
+                    for time_value in special_event.listOfTimeValues:
+                        if _debug: LocalScheduleObject._debug("    - special event time_value: %r", time_value)
+                        if time_value.value.__class__ is Null:
+                            pass
+                        elif time_value.value.__class__ is not schedule_datatype:
+                            raise TypeError("wrong type")
+
+            ### TODO check list of object property references
+
+            # all good
+            self.reliability = 'noFaultDetected'
+            if _debug: LocalScheduleObject._debug("    - no fault detected")
+
+        except Exception as err:
+            if _debug: LocalScheduleObject._debug("    - exception: %r", err)
+            self.reliability = 'configurationError'
 
 #
-#   SampleScheduleInterpreter
+#   LocalScheduleInterpreter
 #
 
 @bacpypes_debugging
-class SampleScheduleInterpreter(RecurringTask):
+class LocalScheduleInterpreter(OneShotTask):
 
     def __init__(self, sched_obj):
-        if _debug: SampleScheduleInterpreter._debug("__init__ %r", sched_obj)
-        RecurringTask.__init__(self, interval=1000)
+        if _debug: LocalScheduleInterpreter._debug("__init__ %r", sched_obj)
+        OneShotTask.__init__(self)
 
         # reference the schedule object to update
         self.sched_obj = sched_obj
-        # self.install_task()
+
+        # add a monitor for the present value
+        sched_obj._property_monitors['presentValue'].append(self.present_value_changed)
+
+        # call to interpret the schedule
+        deferred(self.process_task)
+
+    def present_value_changed(self, old_value, new_value):
+        """This function is called when the presentValue of the local schedule
+        object has changed, both internally by this interpreter, or externally
+        by some client using WriteProperty."""
+        if _debug: LocalScheduleInterpreter._debug("present_value_changed %r %r %r", old_value, new_value)
 
     def process_task(self):
-        if _debug: SampleScheduleInterpreter._debug("process_task")
+        if _debug: LocalScheduleInterpreter._debug("process_task(%s)", self.sched_obj.objectName)
 
-#
-#   something_changed
-#
+        # check for a valid configuration
+        if self.sched_obj.reliability != 'noFaultDetected':
+            return
 
-def something_changed(thing, old_value, new_value):
-    print("%r changed from %r to %r" % (thing, old_value, new_value))
+        current_date = Date().now()
+        if _debug: LocalScheduleInterpreter._debug("    - current_date: %r", current_date.value)
+
+        current_time = Time().now()
+        if _debug: LocalScheduleInterpreter._debug("    - current_time: %r", current_time.value)
 
 #
 #   __main__
@@ -103,7 +176,7 @@ def main():
     this_device.protocolServicesSupported = services_supported.value
 
     # make a schedule object with an integer value
-    so1 = SampleScheduleObject(
+    so1 = LocalScheduleObject(
         objectIdentifier=('schedule', 1),
         objectName='Schedule 1 (integer)',
         presentValue=Integer(8),
@@ -121,7 +194,7 @@ def main():
     _log.debug("    - so1: %r", so1)
     this_application.add_object(so1)
 
-    so2 = SampleScheduleObject(
+    so2 = LocalScheduleObject(
         objectIdentifier=('schedule', 2),
         objectName='Schedule 2 (real)',
         presentValue=Real(73.5),
@@ -136,14 +209,6 @@ def main():
         )
     _log.debug("    - so2: %r", so2)
     this_application.add_object(so2)
-
-    # add very simple monitors
-    so1._property_monitors['presentValue'].append(
-        partial(something_changed, "so1"),
-        )
-    so2._property_monitors['presentValue'].append(
-        partial(something_changed, "so2"),
-        )
 
     # make sure they are all there
     _log.debug("    - object list: %r", this_device.objectList)
