@@ -12,10 +12,10 @@ from bacpypes.consolelogging import ConfigArgumentParser
 from bacpypes.core import run, deferred
 from bacpypes.task import OneShotTask
 
-from bacpypes.primitivedata import Atomic, Null, Integer, Real, Date, Time
-from bacpypes.constructeddata import ArrayOf, AnyAtomic
-from bacpypes.basetypes import DailySchedule, TimeValue
-from bacpypes.object import register_object_type, WritableProperty, ScheduleObject
+from bacpypes.primitivedata import Atomic, Null, Integer, Unsigned, Real, Date, Time
+from bacpypes.constructeddata import Array, ArrayOf, SequenceOf, AnyAtomic
+from bacpypes.basetypes import DailySchedule, DeviceObjectPropertyReference, TimeValue
+from bacpypes.object import register_object_type, get_datatype, WritableProperty, ScheduleObject
 
 from bacpypes.app import BIPSimpleApplication
 from bacpypes.service.device import LocalDeviceObject
@@ -79,6 +79,10 @@ class LocalScheduleObject(ScheduleObject):
                         if time_value is None:
                             pass
                         elif not isinstance(time_value.value, (Null, schedule_datatype)):
+                            if _debug: LocalScheduleObject._debug("    - wrong type: expected %r, got %r",
+                                schedule_datatype,
+                                time_value.__class__,
+                                )
                             raise TypeError("wrong type")
 
             # check the exception schedule values
@@ -89,9 +93,35 @@ class LocalScheduleObject(ScheduleObject):
                         if time_value is None:
                             pass
                         elif not isinstance(time_value.value, (Null, schedule_datatype)):
+                            if _debug: LocalScheduleObject._debug("    - wrong type: expected %r, got %r",
+                                schedule_datatype,
+                                time_value.__class__,
+                                )
                             raise TypeError("wrong type")
 
-            ### TODO check list of object property references
+            # check list of object property references
+            obj_prop_refs = self.listOfObjectPropertyReferences
+            if obj_prop_refs:
+                for obj_prop_ref in obj_prop_refs:
+                    obj_type = obj_prop_ref.objectIdentifier[0]
+
+                    # get the datatype of the property to be written
+                    datatype = get_datatype(obj_type, obj_prop_ref.propertyIdentifier)
+                    if _debug: LocalScheduleObject._debug("    - datatype: %r", datatype)
+
+                    if issubclass(datatype, Array) and (obj_prop_ref.propertyArrayIndex is not None):
+                        if obj_prop_ref.propertyArrayIndex == 0:
+                            datatype = Unsigned
+                        else:
+                            datatype = datatype.subtype
+                        if _debug: LocalScheduleObject._debug("    - datatype: %r", datatype)
+
+                    if datatype is not schedule_datatype:
+                        if _debug: LocalScheduleObject._debug("    - wrong type: expected %r, got %r",
+                            datatype,
+                            schedule_datatype,
+                            )
+                        raise TypeError("wrong type")
 
             # all good
             self.reliability = 'noFaultDetected'
@@ -207,6 +237,12 @@ def main():
                     ]),
             ] * 7),
         scheduleDefault=Real(72.0),
+        listOfObjectPropertyReferences=SequenceOf(DeviceObjectPropertyReference)([
+            DeviceObjectPropertyReference(
+                objectIdentifier=('analogValue', 1),
+                propertyIdentifier='presentValue',
+                ),
+            ]),
         )
     _log.debug("    - so2: %r", so2)
     this_application.add_object(so2)
