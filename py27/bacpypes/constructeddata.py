@@ -406,6 +406,9 @@ def SequenceOf(klass):
         def __getitem__(self, item):
             return self.value[item]
 
+        def __iter__(self):
+            return iter(self.value)
+
         def encode(self, taglist):
             if _debug: _SequenceOf._debug("(%r)encode %r", self.__class__.__name__, taglist)
             for value in self.value:
@@ -588,6 +591,9 @@ def ArrayOf(klass):
             # delete the item and update the length
             del self.value[item]
             self.value[0] -= 1
+
+        def __iter__(self):
+            return iter(self.value[1:])
 
         def index(self, value):
             # only search through values
@@ -1182,13 +1188,11 @@ class AnyAtomic(Atomic):
 
     @classmethod
     def is_valid(cls, arg):
-        """Return True if arg is valid value for the class.  If the string
-        value is wrong for the enumeration, the encoding will fail.
-        """
+        """Return True if arg is valid value for the class."""
         return isinstance(arg, Atomic) and not isinstance(arg, AnyAtomic)
 
     def __str__(self):
-        return "AnyAtomic(%s)" % (str(self.value), )
+        return "%s(%s)" % (self.__class__.__name__, str(self.value))
 
     def __repr__(self):
         desc = self.__module__ + '.' + self.__class__.__name__
