@@ -76,9 +76,9 @@ class LocalScheduleObject(ScheduleObject):
                 for daily_schedule in self.weeklySchedule:
                     for time_value in daily_schedule.daySchedule:
                         if _debug: LocalScheduleObject._debug("    - daily time_value: %r", time_value)
-                        if time_value.value.__class__ is Null:
+                        if time_value is None:
                             pass
-                        elif time_value.value.__class__ is not schedule_datatype:
+                        elif not isinstance(time_value.value, (Null, schedule_datatype)):
                             raise TypeError("wrong type")
 
             # check the exception schedule values
@@ -86,9 +86,9 @@ class LocalScheduleObject(ScheduleObject):
                 for special_event in self.exceptionSchedule:
                     for time_value in special_event.listOfTimeValues:
                         if _debug: LocalScheduleObject._debug("    - special event time_value: %r", time_value)
-                        if time_value.value.__class__ is Null:
+                        if time_value is None:
                             pass
-                        elif time_value.value.__class__ is not schedule_datatype:
+                        elif not isinstance(time_value.value, (Null, schedule_datatype)):
                             raise TypeError("wrong type")
 
             ### TODO check list of object property references
@@ -134,11 +134,12 @@ class LocalScheduleInterpreter(OneShotTask):
         if self.sched_obj.reliability != 'noFaultDetected':
             return
 
-        current_date = Date().now()
-        if _debug: LocalScheduleInterpreter._debug("    - current_date: %r", current_date.value)
+        # get the date and time from the device object
+        current_date = self.sched_obj._app.localDevice.localDate
+        if _debug: LocalScheduleInterpreter._debug("    - current_date: %r", current_date)
 
-        current_time = Time().now()
-        if _debug: LocalScheduleInterpreter._debug("    - current_time: %r", current_time.value)
+        current_time = self.sched_obj._app.localDevice.localTime
+        if _debug: LocalScheduleInterpreter._debug("    - current_time: %r", current_time)
 
 #
 #   __main__
