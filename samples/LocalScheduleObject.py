@@ -84,6 +84,9 @@ class LocalScheduleObject(ScheduleObject):
                                 time_value.__class__,
                                 )
                             raise TypeError("wrong type")
+                        elif 255 in time_value.time:
+                            if _debug: LocalScheduleObject._debug("    - wildcard in time")
+                            raise ValueError("must be a specific time")
 
             # check the exception schedule values
             if self.exceptionSchedule:
