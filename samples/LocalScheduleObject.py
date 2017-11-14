@@ -4,7 +4,8 @@
 Local Schedule Object
 """
 
-from functools import partial
+import sys
+import calendar
 
 from bacpypes.debugging import bacpypes_debugging, ModuleLogger
 from bacpypes.consolelogging import ConfigArgumentParser
@@ -12,7 +13,7 @@ from bacpypes.consolelogging import ConfigArgumentParser
 from bacpypes.core import run, deferred
 from bacpypes.task import OneShotTask
 
-from bacpypes.primitivedata import Atomic, Null, Integer, Unsigned, Real, Date, Time
+from bacpypes.primitivedata import Atomic, Null, Integer, Unsigned, Real
 from bacpypes.constructeddata import Array, ArrayOf, SequenceOf, AnyAtomic
 from bacpypes.basetypes import DailySchedule, DeviceObjectPropertyReference, TimeValue
 from bacpypes.object import register_object_type, get_datatype, WritableProperty, ScheduleObject
@@ -23,6 +24,177 @@ from bacpypes.service.device import LocalDeviceObject
 # some debugging
 _debug = 0
 _log = ModuleLogger(globals())
+
+#
+#   match_date
+#
+
+def match_date(date, date_pattern):
+    """
+    Match a specific date, a four-tuple with no special values, with a date
+    pattern, four-tuple possibly having special values.
+    """
+    # unpack the date and pattern
+    year, month, day, day_of_week = date
+    year_p, month_p, day_p, day_of_week_p = date_pattern
+
+    # check the year
+    if year_p == 255:
+        # any year
+        pass
+    elif year != year_p:
+        # specific year
+        return False
+
+    # check the month
+    if month_p == 255:
+        # any month
+        pass
+    elif month_p == 13:
+        # odd months
+        if (month % 2) == 0:
+            return False
+    elif month_p == 14:
+        # even months
+        if (month % 2) == 1:
+            return False
+    elif month != month_p:
+        # specific month
+        return False
+
+    # check the day
+    if day_p == 255:
+        # any day
+        pass
+    elif day_p == 32:
+        # last day of the month
+        last_day = calendar.monthrange(year + 1900, month)[1]
+        if day != last_day:
+            return False
+    elif day_p == 33:
+        # odd days of the month
+        if (day % 2) == 0:
+            return False
+    elif day_p == 34:
+        # even days of the month
+        if (day % 2) == 1:
+            return False
+    elif day != day_p:
+        # specific day
+        return False
+
+    # check the day of week
+    if day_of_week_p == 255:
+        # any day of the week
+        pass
+    elif day_of_week != day_of_week_p:
+        # specific day of the week
+        return False
+
+    # all tests pass
+    return True
+
+#
+#   match_date_range
+#
+
+def match_date_range(date, date_range):
+    """
+    Match a specific date, a four-tuple with no special values, with a DateRange
+    object which as a start date and end date.
+    """
+    return (date[:3] >= date_range.startDate[:3]) \
+        and (date[:3] <= date_range.endDate[:3])
+
+#
+#   match_weeknday
+#
+
+def match_weeknday(date, weeknday):
+    """
+    Match a specific date, a four-tuple with no special values, with a
+    BACnetWeekNDay, an octet string with three (unsigned) octets.
+    """
+    # unpack the date
+    year, month, day, day_of_week = date
+    last_day = calendar.monthrange(year + 1900, month)[1]
+
+    # unpack the date pattern octet string
+    if sys.version_info[0] == 2:
+        weeknday_unpacked = [ord(c) for c in weeknday]
+    elif sys.version_info[0] == 3:
+        weeknday_unpacked = [c for c in weeknday]
+    else:
+        raise NotImplementedError("match_weeknday requires Python 2.x or 3.x")
+    month_p, week_of_month_p, day_of_week_p = weeknday_unpacked
+
+    # check the month
+    if month_p == 255:
+        # any month
+        pass
+    elif month_p == 13:
+        # odd months
+        if (month % 2) == 0:
+            return False
+    elif month_p == 14:
+        # even months
+        if (month % 2) == 1:
+            return False
+    elif month != month_p:
+        # specific month
+        return False
+
+    # check the week of the month
+    if week_of_month_p == 255:
+        # any week
+        pass
+    elif week_of_month_p == 1:
+        # days numbered 1-7
+        if (day > 7):
+            return False
+    elif week_of_month_p == 2:
+        # days numbered 8-14
+        if (day < 8) or (day > 14):
+            return False
+    elif week_of_month_p == 3:
+        # days numbered 15-21
+        if (day < 15) or (day > 21):
+            return False
+    elif week_of_month_p == 4:
+        # days numbered 22-28
+        if (day < 22) or (day > 28):
+            return False
+    elif week_of_month_p == 5:
+        # days numbered 29-31
+        if (day < 29) or (day > 31):
+            return False
+    elif week_of_month_p == 6:
+        # last 7 days of this month
+        if (day < last_day - 6):
+            return False
+    elif week_of_month_p == 7:
+        # any of the 7 days prior to the last 7 days of this month
+        if (day < last_day - 13) or (day > last_day - 7):
+            return False
+    elif week_of_month_p == 8:
+        # any of the 7 days prior to the last 14 days of this month
+        if (day < last_day - 20) or (day > last_day - 14):
+            return False
+    elif week_of_month_p == 9:
+        # any of the 7 days prior to the last 21 days of this month
+        if (day < last_day - 27) or (day > last_day - 21):
+            return False
+
+    # check the day
+    if day_of_week_p == 255:
+        # any day
+        pass
+    elif day_of_week != day_of_week_p:
+        # specific day
+        return False
+
+    # all tests pass
+    return True
 
 #
 #   LocalScheduleObject
