@@ -9,13 +9,14 @@ import calendar
 
 from bacpypes.debugging import bacpypes_debugging, ModuleLogger
 from bacpypes.consolelogging import ConfigArgumentParser
+from bacpypes.consolecmd import ConsoleCmd
 
 from bacpypes.core import run, deferred
 from bacpypes.task import OneShotTask
 
-from bacpypes.primitivedata import Atomic, Null, Integer, Unsigned, Real
+from bacpypes.primitivedata import Atomic, Null, Integer, Unsigned, Real, Date, Time
 from bacpypes.constructeddata import Array, ArrayOf, SequenceOf, AnyAtomic
-from bacpypes.basetypes import DailySchedule, DeviceObjectPropertyReference, TimeValue
+from bacpypes.basetypes import DailySchedule, DateRange, DeviceObjectPropertyReference, TimeValue
 from bacpypes.object import register_object_type, get_datatype, WritableProperty, ScheduleObject
 
 from bacpypes.app import BIPSimpleApplication
@@ -197,6 +198,27 @@ def match_weeknday(date, weeknday):
     return True
 
 #
+#   date_in_calendar_entry
+#
+
+@bacpypes_debugging
+def date_in_calendar_entry(date, calendar_entry):
+    if _debug: date_in_calendar_entry._debug("date_in_calendar_entry %r %r", date, calendar_entry)
+
+    match = False
+    if calendar_entry.date:
+        match = match_date(date, calendar_entry.date)
+    elif calendar_entry.dateRange:
+        match = match_date_range(date, calendar_entry.dateRange)
+    elif calendar_entry.weekNDay:
+        match = match_weeknday(date, calendar_entry.weekNDay)
+    else:
+        raise RuntimeError("")
+    if _debug: date_in_calendar_entry._debug("    - match: %r", match)
+
+    return match
+
+#
 #   LocalScheduleObject
 #
 
@@ -330,7 +352,7 @@ class LocalScheduleInterpreter(OneShotTask):
         """This function is called when the presentValue of the local schedule
         object has changed, both internally by this interpreter, or externally
         by some client using WriteProperty."""
-        if _debug: LocalScheduleInterpreter._debug("present_value_changed %r %r %r", old_value, new_value)
+        if _debug: LocalScheduleInterpreter._debug("present_value_changed %r %r", old_value, new_value)
 
     def process_task(self):
         if _debug: LocalScheduleInterpreter._debug("process_task(%s)", self.sched_obj.objectName)
@@ -346,12 +368,139 @@ class LocalScheduleInterpreter(OneShotTask):
         current_time = self.sched_obj._app.localDevice.localTime
         if _debug: LocalScheduleInterpreter._debug("    - current_time: %r", current_time)
 
+        # evaluate the time
+        rslt = self.eval(current_date, current_time)
+        if _debug: LocalScheduleInterpreter._debug("    - rslt: %r", rslt)
+
+        # set the present value
+        if rslt:
+            self.sched_obj.presentValue = rslt
+
+    def eval(self, edate, etime):
+        """Evaluate the schedule according to the provided date and time and
+        return the appropriate present value, or None if not in the effective
+        period."""
+        if _debug: LocalScheduleInterpreter._debug("eval %r %r", edate, etime)
+
+        # reference the schedule object
+        sched_obj = self.sched_obj
+        if _debug: LocalScheduleInterpreter._debug("    sched_obj: %r", sched_obj)
+
+        # verify the date falls in the effective period
+        if not match_date_range(edate, sched_obj.effectivePeriod):
+            return None
+
+        # the event priority is a list of values that are in effect for
+        # exception schedules with the special event priority, see 135.1-2013
+        # clause 7.3.2.23.10.3.8, Revision 4 Event Priority Test
+        event_priority = [None] * 16
+
+        # check the exception schedule values
+        if sched_obj.exceptionSchedule:
+            for special_event in sched_obj.exceptionSchedule:
+                if _debug: LocalScheduleInterpreter._debug("    - special_event: %r", special_event)
+
+                # check the special event period
+                special_event_period = special_event.period
+                if special_event_period is None:
+                    raise RuntimeError("special event period required")
+
+                match = False
+                calendar_entry = special_event_period.calendarEntry
+                if calendar_entry:
+                    if _debug: LocalScheduleInterpreter._debug("    - calendar_entry: %r", calendar_entry)
+                    match = date_in_calendar_entry(edate, calendar_entry)
+                else:
+                    # get the calendar object from the application
+                    calendar_object = sched_obj._app.get_object_id(special_event_period.calendarReference)
+                    if not calendar_object:
+                        raise RuntimeError("invalid calendar object reference")
+                    if _debug: LocalScheduleInterpreter._debug("    - calendar_object: %r", calendar_object)
+
+                    for calendar_entry in calendar_object.dateList:
+                        if _debug: LocalScheduleInterpreter._debug("    - calendar_entry: %r", calendar_entry)
+                        match = date_in_calendar_entry(edate, calendar_entry)
+                        if match:
+                            break
+
+                # didn't match the period, try the next special event
+                if not match:
+                    if _debug: LocalScheduleInterpreter._debug("    - no matching calendar entry")
+                    continue
+
+                # event priority array index
+                priority = special_event.priority - 1
+                if _debug: LocalScheduleInterpreter._debug("    - priority: %r", priority)
+
+                # look for all of the possible times
+                for time_value in special_event.listOfTimeValues:
+                    tval = time_value.time.value
+                    if tval <= etime:
+                        if isinstance(time_value.value, Null):
+                            if _debug: LocalScheduleInterpreter._debug("    - relinquish exception @ %r", tval)
+                            event_priority[priority] = None
+                        else:
+                            if _debug: LocalScheduleInterpreter._debug("    - consider exception @ %r", tval)
+                            event_priority[priority] = time_value.value
+
+        # check if any of the special events came up with something
+        for priority_value in event_priority:
+            if priority_value is not None:
+                if _debug: LocalScheduleInterpreter._debug("    - priority_value: %r", priority_value)
+                return priority_value
+
+        # start out with the default
+        daily_value = sched_obj.scheduleDefault
+
+        # check the daily schedule
+        if sched_obj.weeklySchedule:
+            daily_schedule = sched_obj.weeklySchedule[edate[3]]
+            if _debug: LocalScheduleInterpreter._debug("    - daily_schedule: %r", daily_schedule)
+
+            # look for all of the possible times
+            for time_value in daily_schedule.daySchedule:
+                if _debug: LocalScheduleInterpreter._debug("    - time_value: %r", time_value)
+
+                tval = time_value.time
+                if tval <= etime:
+                    if isinstance(time_value.value, Null):
+                        if _debug: LocalScheduleInterpreter._debug("    - back to normal @ %r", tval)
+                        daily_value = sched_obj.scheduleDefault
+                    else:
+                        if _debug: LocalScheduleInterpreter._debug("    - new value @ %r", tval)
+                        daily_value = time_value.value
+
+        # return what was matched, if anything
+        return daily_value
+
+#
+#   TestConsoleCmd
+#
+
+@bacpypes_debugging
+class TestConsoleCmd(ConsoleCmd):
+
+    def do_test(self, args):
+        """test <date> <time>"""
+        args = args.split()
+        if _debug: TestConsoleCmd._debug("do_test %r", args)
+
+        date_string, time_string = args
+        test_date = Date(date_string).value
+        test_time = Time(time_string).value
+
+        rslt = so1._task.eval(test_date, test_time)
+        print("so1: " + repr(rslt and rslt.value))
+
+        rslt = so2._task.eval(test_date, test_time)
+        print("so2: " + repr(rslt and rslt.value))
+
 #
 #   __main__
 #
 
 def main():
-    global args
+    global args, so1, so2
 
     # parse the command line arguments
     parser = ConfigArgumentParser(description=__doc__)
@@ -386,13 +535,17 @@ def main():
         objectIdentifier=('schedule', 1),
         objectName='Schedule 1 (integer)',
         presentValue=Integer(8),
+        effectivePeriod=DateRange(
+            startDate=(0, 1, 1, 1),
+            endDate=(254, 12, 31, 2),
+            ),
         weeklySchedule=ArrayOf(DailySchedule)([
             DailySchedule(
                 daySchedule=[
                     TimeValue(time=(8,0,0,0), value=Integer(8)),
                     TimeValue(time=(14,0,0,0), value=Null()),
                     TimeValue(time=(17,0,0,0), value=Integer(42)),
-                    TimeValue(time=(0,0,0,0), value=Null()),
+#                   TimeValue(time=(0,0,0,0), value=Null()),
                     ]),
             ] * 7),
         scheduleDefault=Integer(0),
@@ -404,6 +557,10 @@ def main():
         objectIdentifier=('schedule', 2),
         objectName='Schedule 2 (real)',
         presentValue=Real(73.5),
+        effectivePeriod=DateRange(
+            startDate=(0, 1, 1, 1),
+            endDate=(254, 12, 31, 2),
+            ),
         weeklySchedule=ArrayOf(DailySchedule)([
             DailySchedule(
                 daySchedule=[
@@ -424,6 +581,8 @@ def main():
 
     # make sure they are all there
     _log.debug("    - object list: %r", this_device.objectList)
+
+    TestConsoleCmd()
 
     _log.debug("running")
 
