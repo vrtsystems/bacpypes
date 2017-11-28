@@ -6,17 +6,19 @@ Local Schedule Object
 
 import sys
 import calendar
+from time import mktime as _mktime, localtime as _localtime
 
-from bacpypes.debugging import bacpypes_debugging, ModuleLogger
+from bacpypes.debugging import bacpypes_debugging, ModuleLogger, xtob
 from bacpypes.consolelogging import ConfigArgumentParser
 from bacpypes.consolecmd import ConsoleCmd
 
 from bacpypes.core import run, deferred
 from bacpypes.task import OneShotTask
 
-from bacpypes.primitivedata import Atomic, Null, Integer, Unsigned, Real, Date, Time
+from bacpypes.primitivedata import Atomic, Null, Integer, Unsigned, Real, Date, Time, CharacterString
 from bacpypes.constructeddata import Array, ArrayOf, SequenceOf, AnyAtomic
-from bacpypes.basetypes import DailySchedule, DateRange, DeviceObjectPropertyReference, TimeValue
+from bacpypes.basetypes import CalendarEntry, DailySchedule, DateRange, \
+    DeviceObjectPropertyReference, SpecialEvent, SpecialEventPeriod, TimeValue
 from bacpypes.object import register_object_type, get_datatype, WritableProperty, ScheduleObject
 
 from bacpypes.app import BIPSimpleApplication
@@ -25,6 +27,9 @@ from bacpypes.service.device import LocalDeviceObject
 # some debugging
 _debug = 0
 _log = ModuleLogger(globals())
+
+# globals
+schedule_objects = []
 
 #
 #   match_date
@@ -219,6 +224,23 @@ def date_in_calendar_entry(date, calendar_entry):
     return match
 
 #
+#   datetime_to_time
+#
+
+def datetime_to_time(date, time):
+    """Take the date and time 4-tuples and return the time in seconds since
+    the epoch as a floating point number."""
+    if (255 in date) or (255 in time):
+        raise RuntimeError("specific date and time required")
+
+    time_tuple = (
+        date[0]+1900, date[1], date[2],
+        time[0], time[1], time[2],
+        0, 0, -1,
+        )
+    return _mktime(time_tuple)
+
+#
 #   LocalScheduleObject
 #
 
@@ -369,12 +391,17 @@ class LocalScheduleInterpreter(OneShotTask):
         if _debug: LocalScheduleInterpreter._debug("    - current_time: %r", current_time)
 
         # evaluate the time
-        rslt = self.eval(current_date, current_time)
-        if _debug: LocalScheduleInterpreter._debug("    - rslt: %r", rslt)
+        current_value, next_transition = self.eval(current_date, current_time)
+        if _debug: LocalScheduleInterpreter._debug("    - current_value, next_transition: %r, %r", current_value, next_transition)
 
         # set the present value
-        if rslt:
-            self.sched_obj.presentValue = rslt
+        self.sched_obj.presentValue = current_value
+
+        # compute the time of the next transition
+        transition_time = datetime_to_time(current_date, next_transition)
+
+        # install this to run again
+        self.install_task(transition_time)
 
     def eval(self, edate, etime):
         """Evaluate the schedule according to the provided date and time and
@@ -394,6 +421,9 @@ class LocalScheduleInterpreter(OneShotTask):
         # exception schedules with the special event priority, see 135.1-2013
         # clause 7.3.2.23.10.3.8, Revision 4 Event Priority Test
         event_priority = [None] * 16
+
+        next_day = (24, 0, 0, 0)
+        next_transition_time = [None] * 16
 
         # check the exception schedule values
         if sched_obj.exceptionSchedule:
@@ -429,25 +459,35 @@ class LocalScheduleInterpreter(OneShotTask):
                     continue
 
                 # event priority array index
-                priority = special_event.priority - 1
+                priority = special_event.eventPriority - 1
                 if _debug: LocalScheduleInterpreter._debug("    - priority: %r", priority)
 
                 # look for all of the possible times
                 for time_value in special_event.listOfTimeValues:
-                    tval = time_value.time.value
+                    tval = time_value.time
                     if tval <= etime:
                         if isinstance(time_value.value, Null):
                             if _debug: LocalScheduleInterpreter._debug("    - relinquish exception @ %r", tval)
                             event_priority[priority] = None
+                            next_transition_time[priority] = None
                         else:
                             if _debug: LocalScheduleInterpreter._debug("    - consider exception @ %r", tval)
                             event_priority[priority] = time_value.value
+                            next_transition_time[priority] = next_day
+                    else:
+                        next_transition_time[priority] = tval
+                        break
+
+        # assume the next transition will be at the start of the next day
+        earliest_transition = next_day
 
         # check if any of the special events came up with something
-        for priority_value in event_priority:
+        for priority_value, next_transition in zip(event_priority, next_transition_time):
+            if next_transition is not None:
+                earliest_transition = min(earliest_transition, next_transition)
             if priority_value is not None:
                 if _debug: LocalScheduleInterpreter._debug("    - priority_value: %r", priority_value)
-                return priority_value
+                return priority_value, earliest_transition
 
         # start out with the default
         daily_value = sched_obj.scheduleDefault
@@ -469,9 +509,12 @@ class LocalScheduleInterpreter(OneShotTask):
                     else:
                         if _debug: LocalScheduleInterpreter._debug("    - new value @ %r", tval)
                         daily_value = time_value.value
+                else:
+                    earliest_transition = min(earliest_transition, tval)
+                    break
 
         # return what was matched, if anything
-        return daily_value
+        return daily_value, earliest_transition
 
 #
 #   TestConsoleCmd
@@ -489,18 +532,24 @@ class TestConsoleCmd(ConsoleCmd):
         test_date = Date(date_string).value
         test_time = Time(time_string).value
 
-        rslt = so1._task.eval(test_date, test_time)
-        print("so1: " + repr(rslt and rslt.value))
+        for so in schedule_objects:
+            v, t = so._task.eval(test_date, test_time)
+            print(so.objectName + ", " + repr(v and v.value) + " until " + str(t))
 
-        rslt = so2._task.eval(test_date, test_time)
-        print("so2: " + repr(rslt and rslt.value))
+    def do_now(self, args):
+        """now"""
+        args = args.split()
+        if _debug: TestConsoleCmd._debug("do_now %r", args)
+
+        y = _localtime()
+        print("y: {}".format(y))
 
 #
 #   __main__
 #
 
 def main():
-    global args, so1, so2
+    global args, schedule_objects
 
     # parse the command line arguments
     parser = ConfigArgumentParser(description=__doc__)
@@ -530,10 +579,13 @@ def main():
     # let the device object know
     this_device.protocolServicesSupported = services_supported.value
 
-    # make a schedule object with an integer value
-    so1 = LocalScheduleObject(
+    #
+    #   Simple daily schedule (actually a weekly schedule with every day
+    #   being identical.
+    #
+    so = LocalScheduleObject(
         objectIdentifier=('schedule', 1),
-        objectName='Schedule 1 (integer)',
+        objectName='Schedule 1',
         presentValue=Integer(8),
         effectivePeriod=DateRange(
             startDate=(0, 1, 1, 1),
@@ -546,16 +598,85 @@ def main():
                     TimeValue(time=(14,0,0,0), value=Null()),
                     TimeValue(time=(17,0,0,0), value=Integer(42)),
 #                   TimeValue(time=(0,0,0,0), value=Null()),
-                    ]),
+                    ]
+                ),
             ] * 7),
         scheduleDefault=Integer(0),
         )
-    _log.debug("    - so1: %r", so1)
-    this_application.add_object(so1)
+    _log.debug("    - so: %r", so)
+    this_application.add_object(so)
+    schedule_objects.append(so)
 
-    so2 = LocalScheduleObject(
+    #
+    #   A special schedule when the Year 2000 problem was supposed to collapse
+    #   systems, the panic clears ten minutes later when it didn't.
+    #
+    so = LocalScheduleObject(
         objectIdentifier=('schedule', 2),
-        objectName='Schedule 2 (real)',
+        objectName='Schedule 2',
+        presentValue=CharacterString(""),
+        effectivePeriod=DateRange(
+            startDate=(0, 1, 1, 1),
+            endDate=(254, 12, 31, 2),
+            ),
+        exceptionSchedule=ArrayOf(SpecialEvent)([
+            SpecialEvent(
+                period=SpecialEventPeriod(
+                    calendarEntry=CalendarEntry(
+                        date=Date("2000-01-01").value,
+                        ),
+                    ),
+                listOfTimeValues=[
+                    TimeValue(time=(0,0,0,0), value=CharacterString("Panic!")),
+                    TimeValue(time=(0,10,0,0), value=Null()),
+                    ],
+                eventPriority=1,
+                ),
+            ]),
+        scheduleDefault=CharacterString("Don't panic."),
+        )
+    _log.debug("    - so: %r", so)
+    this_application.add_object(so)
+    schedule_objects.append(so)
+
+    #
+    #   A special schedule when the Year 2000 problem was supposed to collapse
+    #   systems, the panic clears ten minutes later when it didn't.
+    #
+    so = LocalScheduleObject(
+        objectIdentifier=('schedule', 3),
+        objectName='Schedule 3',
+        presentValue=CharacterString(""),
+        effectivePeriod=DateRange(
+            startDate=(0, 1, 1, 1),
+            endDate=(254, 12, 31, 2),
+            ),
+        exceptionSchedule=ArrayOf(SpecialEvent)([
+            SpecialEvent(
+                period=SpecialEventPeriod(
+                    calendarEntry=CalendarEntry(
+                        weekNDay=xtob("FF.FF.05"),
+                        ),
+                    ),
+                listOfTimeValues=[
+                    TimeValue(time=(0,0,0,0), value=CharacterString("It's Friday!")),
+                    ],
+                eventPriority=1,
+                ),
+            ]),
+        scheduleDefault=CharacterString("Keep working."),
+        )
+    _log.debug("    - so: %r", so)
+    this_application.add_object(so)
+    schedule_objects.append(so)
+
+    #
+    #   A schedule object that refers to an AnalogValueObject in the test
+    #   device.
+    #
+    so = LocalScheduleObject(
+        objectIdentifier=('schedule', 4),
+        objectName='Schedule 4',
         presentValue=Real(73.5),
         effectivePeriod=DateRange(
             startDate=(0, 1, 1, 1),
@@ -566,7 +687,8 @@ def main():
                 daySchedule=[
                     TimeValue(time=(9,0,0,0), value=Real(78.0)),
                     TimeValue(time=(10,0,0,0), value=Null()),
-                    ]),
+                    ]
+                ),
             ] * 7),
         scheduleDefault=Real(72.0),
         listOfObjectPropertyReferences=SequenceOf(DeviceObjectPropertyReference)([
@@ -576,8 +698,122 @@ def main():
                 ),
             ]),
         )
-    _log.debug("    - so2: %r", so2)
-    this_application.add_object(so2)
+    _log.debug("    - so: %r", so)
+    this_application.add_object(so)
+    schedule_objects.append(so)
+
+    #
+    #   The beast
+    #
+    so = LocalScheduleObject(
+        objectIdentifier=('schedule', 5),
+        objectName='Schedule 5',
+        presentValue=Integer(0),
+        effectivePeriod=DateRange(
+            startDate=(0, 1, 1, 1),
+            endDate=(254, 12, 31, 2),
+            ),
+        exceptionSchedule=ArrayOf(SpecialEvent)([
+            SpecialEvent(
+                period=SpecialEventPeriod(
+                    calendarEntry=CalendarEntry(
+                        weekNDay=xtob("FF.FF.FF"),
+                        ),
+                    ),
+                listOfTimeValues=[
+                    TimeValue(time=(5,0,0,0), value=Integer(5)),
+                    TimeValue(time=(6,0,0,0), value=Null()),
+                    ],
+                eventPriority=1,
+                ),
+            SpecialEvent(
+                period=SpecialEventPeriod(
+                    calendarEntry=CalendarEntry(
+                        weekNDay=xtob("FF.FF.FF"),
+                        ),
+                    ),
+                listOfTimeValues=[
+                    TimeValue(time=(4,0,0,0), value=Integer(4)),
+                    TimeValue(time=(7,0,0,0), value=Null()),
+                    ],
+                eventPriority=2,
+                ),
+            SpecialEvent(
+                period=SpecialEventPeriod(
+                    calendarEntry=CalendarEntry(
+                        weekNDay=xtob("FF.FF.FF"),
+                        ),
+                    ),
+                listOfTimeValues=[
+                    TimeValue(time=(3,0,0,0), value=Integer(3)),
+                    TimeValue(time=(8,0,0,0), value=Null()),
+                    ],
+                eventPriority=3,
+                ),
+            SpecialEvent(
+                period=SpecialEventPeriod(
+                    calendarEntry=CalendarEntry(
+                        weekNDay=xtob("FF.FF.FF"),
+                        ),
+                    ),
+                listOfTimeValues=[
+                    TimeValue(time=(2,0,0,0), value=Integer(2)),
+                    TimeValue(time=(9,0,0,0), value=Null()),
+                    ],
+                eventPriority=4,
+                ),
+            SpecialEvent(
+                period=SpecialEventPeriod(
+                    calendarEntry=CalendarEntry(
+                        weekNDay=xtob("FF.FF.FF"),
+                        ),
+                    ),
+                listOfTimeValues=[
+                    TimeValue(time=(1,0,0,0), value=Integer(1)),
+                    ],
+                eventPriority=5,
+                ),
+            ]),
+        scheduleDefault=Integer(0),
+        )
+    _log.debug("    - so: %r", so)
+    this_application.add_object(so)
+    schedule_objects.append(so)
+
+
+    ltv = []
+    for hr in range(24):
+        for mn in range(0, 60, 5):
+            ltv.append(TimeValue(time=(hr,mn,0,0), value=Integer(hr * 100 + mn)))
+
+    #
+    #   Every five minutes
+    #
+    so = LocalScheduleObject(
+        objectIdentifier=('schedule', 6),
+        objectName='Schedule 6',
+        presentValue=Integer(0),
+        effectivePeriod=DateRange(
+            startDate=(0, 1, 1, 1),
+            endDate=(254, 12, 31, 2),
+            ),
+        exceptionSchedule=ArrayOf(SpecialEvent)([
+            SpecialEvent(
+                period=SpecialEventPeriod(
+                    calendarEntry=CalendarEntry(
+                        weekNDay=xtob("FF.FF.FF"),
+                        ),
+                    ),
+                listOfTimeValues=ltv,
+                eventPriority=1,
+                ),
+            ]),
+        scheduleDefault=Integer(0),
+        )
+    _log.debug("    - so: %r", so)
+    this_application.add_object(so)
+    schedule_objects.append(so)
+
 
     # make sure they are all there
     _log.debug("    - object list: %r", this_device.objectList)
